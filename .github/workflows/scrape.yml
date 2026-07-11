@@ -1,0 +1,63 @@
+name: Scrape Pokeca Lottery
+
+on:
+  schedule:
+    - cron: "17 0,3,9,15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pokeca-scrape
+  cancel-in-progress: true
+
+jobs:
+  scrape-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install deps
+        run: npm install
+
+      - name: Run scraper
+        run: node src/index.mjs
+
+      - name: Validate outputs
+        run: |
+          test -f output/normalized.json
+          test -s output/normalized.json
+
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p site
+          cp output/normalized.json site/normalized.json
+          cp output/latest.json site/latest.json
+          cp output/debug.json site/debug.json
+          echo '<html><body><h1>Pokeca Lottery Sync</h1><ul><li><a href="latest.json">latest.json</a></li><li><a href="normalized.json">normalized.json</a></li><li><a href="debug.json">debug.json</a></li></ul></body></html>' > site/index.html
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
