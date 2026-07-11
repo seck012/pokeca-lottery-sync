@@ -103,9 +103,10 @@ function toDeadlineText(iso) {
   const hh = m[4];
   const mi = m[5];
 
-  // 曜日は JST の日付で計算
-  const jstDate = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00+09:00`);
-  const wd = WEEKDAY_JP[jstDate.getUTCDay()];
+  // JSTの正午でDateを作れば、どのTZで動いてもJSTの曜日が返る
+  const jstNoon = new Date(`${m[1]}-${m[2]}-${m[3]}T12:00:00+09:00`);
+  const wd = WEEKDAY_JP[jstNoon.getDay()];
+
 
   return `${month}/${day}(${wd}) ${hh}:${mi}`;
 }
