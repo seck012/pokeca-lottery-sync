@@ -1,306 +1,291 @@
-import { scrapeNyukaNow } from "./sources/nyuka-now.mjs";
 import fs from "node:fs/promises";
+import path from "node:path";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import scrapeNyukaNow from "./sources/nyuka-now.mjs";
 
-const MAX_ITEMS = 300;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, "..");
+const OUTPUT_DIR = path.join(ROOT_DIR, "output");
 
-function cleanText(text) {
-  return (text || "")
+function cleanText(value = "") {
+  return String(value)
     .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function sha1(text) {
-  return crypto.createHash("sha1").update(text).digest("hex").slice(0, 16);
+function makeId(parts) {
+  return crypto
+    .createHash("sha1")
+    .update(parts.filter(Boolean).join("|"))
+    .digest("hex")
+    .slice(0, 16);
 }
 
-function normalizeStoreName(name) {
-  const t = cleanText(name);
+function normalizeStore(store = "") {
+  const s = cleanText(store);
 
-  if (!t) return "不明店舗";
+  if (!s) return "不明店舗";
 
-  const rules = [
-    [/竜のしっぽ/i, "竜のしっぽ各店"],
-    [/キッズリパブリック/i, "キッズリパブリック（アプリ）"],
-    [/ポケモンカードラウンジ渋谷店/i, "ポケモンカードラウンジ渋谷店"],
-    [/ジョーシン/i, "ジョーシン（アプリ）"],
-    [/三洋堂書店/i, "三洋堂書店"],
-    [/トレカプラザ55通販/i, "トレカプラザ55通販"],
-    [/フルコンプ/i, "フルコンプ 一部店舗"],
-    [/シーガル/i, "シーガル各店"],
-    [/イオン九州/i, "イオン九州"],
-    [/ポケモンセンター/i, "ポケモンセンターオンライン"],
-    [/ヨドバシ/i, "ヨドバシカメラ"],
-    [/ビックカメラ/i, "ビックカメラ"],
-    [/ヤマダ/i, "ヤマダデンキ"],
-    [/古本市場/i, "古本市場"],
-    [/駿河屋/i, "駿河屋"],
-    [/セブンネット/i, "セブンネット"],
-    [/楽天ブックス/i, "楽天ブックス"],
-    [/イオン/i, "イオン"]
-  ];
+  return s
+    .replace(/\s+/g, " ")
+    .replace(/（店舗一覧）/g, "")
+    .trim();
+}
 
-  for (const [pattern, normalized] of rules) {
-    if (pattern.test(t)) return normalized;
+function normalizeProduct(product = "", products = []) {
+  let s = cleanText(product);
+
+  if ((!s || s === "不明商品") && Array.isArray(products) && products.length > 0) {
+    s = products
+      .map((x) => cleanText(x))
+      .filter(Boolean)
+      .join(" / ");
   }
 
-  // LivePocket / Amazon / 楽天系ストア のような「プラットフォーム名」は採用しない
-  if (/LivePocket|Amazon|楽天系ストア/i.test(t)) return "不明店舗";
+  s = s.replace(/^ポケモンカード\s*/g, "").trim();
 
-  return t;
-}
+  // 商品名ではないノイズを除外
+  const NG_PATTERNS = [
+    /^当選者/,
+    /^応募には/,
+    /^※/,
+    /^詳細は/,
+    /^ジョーシンアプリ/,
+    /^シーガルモバイル会員限定/,
+    /^WEB抽選受付/,
+    /^アプリ抽選受付/,
+    /^店頭販売/,
+    /^オンライン販売/,
+    /Amazonでの販売予想価格/,
+  ];
 
-function normalizeProductItem(text) {
-  let t = cleanText(text);
+  if (!s) return "";
+  if (NG_PATTERNS.some((re) => re.test(s))) return "";
 
-  if (!t) return null;
-
-  t = t
-    .replace(/^ポケモンカードゲーム\s*/i, "")
-    .replace(/^ポケモンカード\s*/i, "")
-    .replace(/\s{2,}/g, " ")
+  // 長すぎる説明文を少し掃除
+  s = s
+    .replace(/応募には.+$/g, "")
+    .replace(/※.+$/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 
-  const banned = [
-    "当選者は",
-    "購入可能",
-    "販売予想価格",
-    "価格",
-    "応募条件",
-    "おひとりさま",
-    "まで購入可能",
-    "注意事項",
-    "会員限定",
-    "抽選形式",
-    "開始日",
-    "終了日",
-    "当選発表",
-    "詳細ページ",
-    "応募ページ"
-  ];
-
-  if (banned.some(word => t.includes(word))) return null;
-  if (t.length < 2) return null;
-
-  return t;
+  return s;
 }
 
-function summarizeProducts(items) {
-  const normalized = [...new Set(
-    (items || [])
-      .map(normalizeProductItem)
-      .filter(Boolean)
-  )];
+function parseJapaneseDateToIso(text = "") {
+  const raw = cleanText(text);
+  if (!raw) return null;
 
-  if (normalized.length === 0) return null;
-  if (normalized.length === 1) return normalized[0];
-  if (normalized.length === 2) return `${normalized[0]} / ${normalized[1]}`;
+  const yearNow = new Date().getUTCFullYear();
 
-  return `${normalized[0]} ほか${normalized.length - 1}件`;
+  const buildIso = (year, month, day, hour = "23", minute = "59") => {
+    const yyyy = String(year).padStart(4, "0");
+    const mm = String(month).padStart(2, "0");
+    const dd = String(day).padStart(2, "0");
+    const hh = String(hour).padStart(2, "0");
+    const mi = String(minute).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}T${hh}:${mi}:00+09:00`;
+  };
+
+  let m;
+
+  // 2026年7月24日(金) 18時以降順次
+  m = raw.match(/(\d{4})年(\d{1,2})月(\d{1,2})日.*?(\d{1,2})時(?:(\d{1,2})分?)?/);
+  if (m) return buildIso(m[1], m[2], m[3], m[4], m[5] ?? "00");
+
+  // 2026年7月24日(金) 18:00
+  m = raw.match(/(\d{4})年(\d{1,2})月(\d{1,2})日.*?(\d{1,2})[:：](\d{2})/);
+  if (m) return buildIso(m[1], m[2], m[3], m[4], m[5]);
+
+  // 7月12日(日)23:59
+  m = raw.match(/(\d{1,2})月(\d{1,2})日.*?(\d{1,2})[:：](\d{2})/);
+  if (m) return buildIso(yearNow, m[1], m[2], m[3], m[4]);
+
+  // 7月12日(日)23時59分
+  m = raw.match(/(\d{1,2})月(\d{1,2})日.*?(\d{1,2})時(\d{1,2})分?/);
+  if (m) return buildIso(yearNow, m[1], m[2], m[3], m[4]);
+
+  // 7/30 12:00
+  m = raw.match(/(\d{1,2})\/(\d{1,2})\s*(\d{1,2})[:：](\d{2})/);
+  if (m) return buildIso(yearNow, m[1], m[2], m[3], m[4]);
+
+  // 7/29
+  m = raw.match(/(\d{1,2})\/(\d{1,2})/);
+  if (m) return buildIso(yearNow, m[1], m[2], "23", "59");
+
+  // 7月21日
+  m = raw.match(/(\d{1,2})月(\d{1,2})日/);
+  if (m) return buildIso(yearNow, m[1], m[2], "23", "59");
+
+  return null;
 }
 
-function parseJapaneseDeadline(raw) {
-  const t = cleanText(raw);
-  if (!t || t === "不明" || t === "-") {
-    return { iso: null, text: "不明" };
-  }
-
-  let month = null;
-  let day = null;
-  let hour = "23";
-  let minute = "59";
-
-  let m = t.match(/(\d{1,2})月(\d{1,2})日(?:\([^)]*\))?(?:(\d{1,2})[:時](\d{2})?)?/);
-  if (m) {
-    month = m[1];
-    day = m[2];
-    if (m[3]) hour = String(m[3]).padStart(2, "0");
-    if (m[4]) {
-      minute = String(m[4]).padStart(2, "0");
-    } else if (/時/.test(t) && !/:/.test(t)) {
-      minute = "00";
-    }
-  } else {
-    m = t.match(/(\d{1,2})\/(\d{1,2})(?:.*?(\d{1,2})[:時](\d{2})?)?/);
+function toDeadlineText(rawText = "", iso = null) {
+  if (iso) {
+    const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
     if (m) {
-      month = m[1];
-      day = m[2];
-      if (m[3]) hour = String(m[3]).padStart(2, "0");
-      if (m[4]) {
-        minute = String(m[4]).padStart(2, "0");
-      } else if (/時/.test(t) && !/:/.test(t)) {
-        minute = "00";
-      }
+      const month = Number(m[2]);
+      const day = Number(m[3]);
+      const hh = m[4];
+      const mi = m[5];
+      return `${month}/${day} ${hh}:${mi}`;
     }
   }
 
-  if (!month || !day) {
-    return { iso: null, text: "不明" };
-  }
-
-  const year = new Date().getFullYear();
-  const month2 = String(month).padStart(2, "0");
-  const day2 = String(day).padStart(2, "0");
-  const isoDate = new Date(`${year}-${month2}-${day2}T${hour}:${minute}:00+09:00`);
-
-  if (Number.isNaN(isoDate.getTime())) {
-    return { iso: null, text: "不明" };
-  }
-
-  const hasExplicitTime =
-    /:\d{2}/.test(t) || /\d{1,2}時/.test(t);
-
-  const text = hasExplicitTime
-    ? `${Number(month)}/${Number(day)} ${hour}:${minute}`
-    : `${Number(month)}/${Number(day)}`;
-
-  return {
-    iso: isoDate.toISOString(),
-    text
-  };
+  const raw = cleanText(rawText);
+  return raw || "不明";
 }
 
-function classifyStatus(deadlineIso) {
+function normalizeStatus(deadlineIso) {
   if (!deadlineIso) return "open";
-
-  const now = new Date();
-  const deadline = new Date(deadlineIso);
-
-  if (deadline < now) return "closed";
-  return "open";
+  const now = Date.now();
+  const end = new Date(deadlineIso).getTime();
+  if (Number.isNaN(end)) return "open";
+  return end < now ? "closed" : "open";
 }
 
-function chooseBetter(existing, incoming) {
-  const score = (x) => {
-    let s = 0;
-    if (x.store && x.store !== "不明店舗") s += 5;
-    if (x.deadline_iso) s += 4;
-    if (x.apply_url) s += 3;
-    if (x.product && !x.product.includes("ほか")) s += 2;
-    return s;
-  };
+function pickApplyUrl(row) {
+  return (
+    cleanText(row.apply_url) ||
+    cleanText(row.applyUrl) ||
+    cleanText(row.detail_url) ||
+    cleanText(row.detailUrl) ||
+    ""
+  );
+}
 
-  return score(incoming) > score(existing) ? incoming : existing;
+function dedupe(items) {
+  const map = new Map();
+
+  for (const item of items) {
+    const key = [
+      item.store,
+      item.product,
+      item.apply_url,
+      item.deadline_iso || item.deadline_text,
+    ].join("|");
+
+    if (!map.has(key)) {
+      map.set(key, item);
+    }
+  }
+
+  return [...map.values()];
 }
 
 async function main() {
-  const results = await Promise.allSettled([
-    scrapeNyukaNow()
-  ]);
+  await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-  const raw = results.flatMap(r => r.status === "fulfilled" ? r.value : []);
-  console.log(`[info] raw items: ${raw.length}`);
+  const rawItems = await scrapeNyukaNow();
+  console.log(`[info] raw items: ${rawItems.length}`);
 
-  if (raw.length === 0) {
-    console.error("[error] no items scraped");
-    process.exit(1);
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    throw new Error("no items scraped");
   }
 
   const dropped = [];
   const normalized = [];
 
-  for (const r of raw) {
-    const store = normalizeStoreName(r.store_raw || r.section_heading);
-    const product = summarizeProducts(r.product_items_raw || []);
-    const deadline = parseJapaneseDeadline(r.entry_end_raw);
-    const apply_url = cleanText(r.apply_url_raw);
+  for (const row of rawItems) {
+    const store = normalizeStore(row.store);
+    const product = normalizeProduct(row.product, row.products);
+    const applyUrl = pickApplyUrl(row);
+    const deadlineIso = parseJapaneseDateToIso(row.entryEndText || "");
+    const deadlineText = toDeadlineText(row.entryEndText || "", deadlineIso);
+    const status = normalizeStatus(deadlineIso);
 
     if (!product) {
-      dropped.push({ reason: "bad_product", raw: r });
+      dropped.push({
+        reason: "bad_product",
+        store,
+        rawProduct: row.product,
+      });
       continue;
     }
 
-    if (!apply_url) {
-      dropped.push({ reason: "missing_apply_url", raw: r });
+    if (!applyUrl) {
+      dropped.push({
+        reason: "missing_apply_url",
+        store,
+        product,
+      });
       continue;
     }
 
-    if (store === "不明店舗") {
-      dropped.push({ reason: "unknown_store", raw: r });
-      continue;
-    }
-
-    const idSeed = [
+    const item = {
+      id: makeId([store, product, applyUrl, deadlineText]),
+      source: "nyuka-now",
       store,
       product,
-      apply_url,
-      deadline.iso || ""
-    ].join("|");
+      deadline_text: deadlineText,
+      deadline_iso: deadlineIso,
+      apply_url: applyUrl,
+      status,
+      raw: {
+        entryEndText: row.entryEndText || "",
+        lotteryType: row.lotteryType || "",
+        detailUrl: row.detailUrl || row.detail_url || "",
+      },
+    };
 
-    normalized.push({
-      id: sha1(idSeed),
-      store,
-      product,
-      deadline_text: deadline.text,
-      deadline_iso: deadline.iso,
-      apply_url,
-      status: classifyStatus(deadline.iso),
-      _debug: {
-        source: r.source,
-        detail_url: r.detail_url,
-        section_heading: r.section_heading || null,
-        product_items_raw: r.product_items_raw || [],
-        entry_end_raw: r.entry_end_raw || null,
-        conditions_raw: r.conditions_raw || null
-      }
-    });
+    normalized.push(item);
   }
 
-  const dedupedMap = new Map();
-  for (const item of normalized) {
-    const existing = dedupedMap.get(item.id);
-    if (!existing) {
-      dedupedMap.set(item.id, item);
-    } else {
-      dedupedMap.set(item.id, chooseBetter(existing, item));
-    }
-  }
+  const deduped = dedupe(normalized);
 
-  const deduped = Array.from(dedupedMap.values())
-    .sort((a, b) => {
-      if (!a.deadline_iso && !b.deadline_iso) {
-        return a.store.localeCompare(b.store, "ja");
-      }
-      if (!a.deadline_iso) return 1;
-      if (!b.deadline_iso) return -1;
-      return new Date(a.deadline_iso) - new Date(b.deadline_iso);
-    })
-    .slice(0, MAX_ITEMS);
+  // closedを落としすぎると空になるので、まずは open 優先、なければ全件
+  const openItems = deduped.filter((x) => x.status === "open");
+  const latest = openItems.length > 0 ? openItems : deduped;
 
-  const latest = deduped
-    .filter(x => x.status === "open")
-    .map(({ _debug, ...rest }) => rest);
+  console.log(`[info] normalized items: ${normalized.length}`);
+  console.log(`[info] deduped items: ${deduped.length}`);
+  console.log(`[info] latest items: ${latest.length}`);
 
   if (latest.length === 0) {
-    console.error("[error] latest.json would be empty");
-    process.exit(1);
+    throw new Error("latest.json would be empty");
   }
 
-  await fs.mkdir("output", { recursive: true });
-  await fs.writeFile("output/latest.json", JSON.stringify(latest, null, 2));
-  await fs.writeFile("output/normalized.json", JSON.stringify(deduped, null, 2));
-  await fs.writeFile("output/debug.json", JSON.stringify({
-    generatedAt: new Date().toISOString(),
-    rawCount: raw.length,
-    normalizedCount: normalized.length,
-    dedupedCount: deduped.length,
-    latestCount: latest.length,
-    droppedCount: dropped.length,
-    droppedSample: dropped.slice(0, 10).map(x => ({
-      reason: x.reason,
-      section_heading: x.raw.section_heading || null,
-      product_items_raw: x.raw.product_items_raw || [],
-      apply_url_raw: x.raw.apply_url_raw || null,
-      entry_end_raw: x.raw.entry_end_raw || null
+  const normalizedJson = JSON.stringify(deduped, null, 2);
+  const latestJson = JSON.stringify(
+    latest.map((x) => ({
+      id: x.id,
+      store: x.store,
+      product: x.product,
+      deadline_text: x.deadline_text,
+      deadline_iso: x.deadline_iso,
+      apply_url: x.apply_url,
+      status: x.status,
     })),
-    sample: latest.slice(0, 8)
-  }, null, 2));
+    null,
+    2
+  );
 
-  console.log("[ok] output files written");
+  const debugJson = JSON.stringify(
+    {
+      generated_at: new Date().toISOString(),
+      rawCount: rawItems.length,
+      normalizedCount: normalized.length,
+      dedupedCount: deduped.length,
+      latestCount: latest.length,
+      droppedCount: dropped.length,
+      droppedSample: dropped.slice(0, 20),
+      sample: latest.slice(0, 20),
+    },
+    null,
+    2
+  );
+
+  await fs.writeFile(path.join(OUTPUT_DIR, "normalized.json"), normalizedJson);
+  await fs.writeFile(path.join(OUTPUT_DIR, "latest.json"), latestJson);
+  await fs.writeFile(path.join(OUTPUT_DIR, "debug.json"), debugJson);
+
+  console.log("[info] output files written");
 }
 
-main().catch(err => {
-  console.error("[fatal]", err);
+main().catch((err) => {
+  console.error("Error:", err.message || err);
   process.exit(1);
 });
