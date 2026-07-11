@@ -139,11 +139,13 @@ function unwrapUrl(url = "") {
   }
 }
 
+// 1店舗×同一開始×同一締切×同一URLをまとめる
 function mergeSameGroup(items) {
   const map = new Map();
   for (const it of items) {
     const groupKey = [
       it.store,
+      it.start_iso || "no-start",
       it.deadline_iso || "no-deadline",
       it.apply_url,
     ].join("|");
@@ -216,7 +218,6 @@ async function main() {
     );
   }
 
-  // 取得失敗 or 0件 → ジョブは緑のまま終わる
   if (scrapeError || !Array.isArray(rawItems) || rawItems.length === 0) {
     await writeSuccessOnFailure({
       reason: scrapeError
@@ -237,8 +238,12 @@ async function main() {
     const applyUrlRaw = pickApplyUrl(row);
     const applyUrl = unwrapUrl(applyUrlRaw);
 
+    const startIso = parseJapaneseDateToIso(row.entryStartText || "");
+    const startText = startIso ? toDeadlineText(startIso) : "不明";
+
     const deadlineIso = parseJapaneseDateToIso(row.entryEndText || "");
     const deadlineText = toDeadlineText(deadlineIso);
+
     const status = normalizeStatus(deadlineIso);
 
     if (!productSingle) {
@@ -253,6 +258,8 @@ async function main() {
     normalized.push({
       store,
       product: productSingle,
+      start_text: startText,
+      start_iso: startIso,
       deadline_text: deadlineText,
       deadline_iso: deadlineIso,
       apply_url: applyUrl,
@@ -263,11 +270,18 @@ async function main() {
   const merged = mergeSameGroup(normalized);
 
   const finalized = merged.map((it) => {
-    const id = makeId([it.store, it.product, it.apply_url, it.deadline_iso || it.deadline_text]);
+    const id = makeId([
+      it.store,
+      it.product,
+      it.apply_url,
+      it.start_iso || it.start_text,
+      it.deadline_iso || it.deadline_text,
+    ]);
     const title = `【${it.store}】${it.product}`;
     const notes = [
       `id:${id}`,
       `応募URL:${it.apply_url}`,
+      `開始:${it.start_text || "不明"}`,
       `締切:${it.deadline_text}`,
     ].join("\n");
 
@@ -276,6 +290,8 @@ async function main() {
       title,
       store: it.store,
       product: it.product,
+      start_text: it.start_text || "不明",
+      start_iso: it.start_iso || null,
       deadline_text: it.deadline_text,
       deadline_iso: it.deadline_iso,
       has_deadline: Boolean(it.deadline_iso),
@@ -326,7 +342,6 @@ async function main() {
 }
 
 main().catch(async (err) => {
-  // 想定外エラーもソフト成功で吸収 (デプロイは続行させる)
   try {
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
     await writeSuccessOnFailure({
