@@ -37,8 +37,6 @@ function normalizeProduct(product = "", products = []) {
   }
 
   s = s.replace(/^ポケモンカード\s*/g, "").trim();
-
-  // BOX、で終わっていて次が繋がっていないケースを掃除
   s = s.replace(/BOX、\s*スターターセットex/g, "BOX / スターターセットex");
 
   const NG = [
@@ -88,13 +86,9 @@ function parseJapaneseDateToIso(text = "") {
   return null;
 }
 
-// JST基準で曜日付き日付表示
+// JST基準で曜日付き日付表示 (JST正午で計算するのでランナーTZに依存しない)
 function toDeadlineText(iso) {
   if (!iso) return "不明";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "不明";
-
-  // ISO文字列から直接パーツを取り出す（JSTタイムゾーン付きで作っているため信頼できる）
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
   if (!m) return "不明";
 
@@ -103,10 +97,8 @@ function toDeadlineText(iso) {
   const hh = m[4];
   const mi = m[5];
 
-  // JSTの正午でDateを作れば、どのTZで動いてもJSTの曜日が返る
   const jstNoon = new Date(`${m[1]}-${m[2]}-${m[3]}T12:00:00+09:00`);
   const wd = WEEKDAY_JP[jstNoon.getDay()];
-
 
   return `${month}/${day}(${wd}) ${hh}:${mi}`;
 }
@@ -126,41 +118,29 @@ function pickApplyUrl(row) {
     .map((x) => cleanText(x || ""))
     .filter(Boolean);
 
-  // nyuka-now.com はまとめサイト自身なので優先度を最低にする
   const strong = candidates.filter((u) => !/nyuka-now\.com/i.test(u));
   const weak = candidates.filter((u) => /nyuka-now\.com/i.test(u));
-
   return strong[0] || weak[0] || "";
 }
 
-// アフィリエイト等のリダイレクトURLを素のURLに展開
 function unwrapUrl(url = "") {
   if (!url) return "";
   try {
     const u = new URL(url);
-
-    // 楽天のリダイレクト: hb.afl.rakuten.co.jp/... ?pc=https%3A%2F%2F...
     const pc = u.searchParams.get("pc");
-    if (u.hostname.endsWith("rakuten.co.jp") && pc) {
-      return pc;
-    }
-
-    // その他: url= や target= に URL が入っているタイプ
+    if (u.hostname.endsWith("rakuten.co.jp") && pc) return pc;
     for (const key of ["url", "target", "u", "redirect"]) {
       const v = u.searchParams.get(key);
       if (v && /^https?:\/\//i.test(v)) return v;
     }
-
     return url;
   } catch {
     return url;
   }
 }
 
-// 1店舗×同一締切×同一応募URLをまとめる
 function mergeSameGroup(items) {
   const map = new Map();
-
   for (const it of items) {
     const groupKey = [
       it.store,
@@ -169,25 +149,16 @@ function mergeSameGroup(items) {
     ].join("|");
 
     if (!map.has(groupKey)) {
-      map.set(groupKey, {
-        ...it,
-        products: [it.product],
-      });
+      map.set(groupKey, { ...it, products: [it.product] });
     } else {
       const prev = map.get(groupKey);
-      if (!prev.products.includes(it.product)) {
-        prev.products.push(it.product);
-      }
+      if (!prev.products.includes(it.product)) prev.products.push(it.product);
     }
   }
-
-  return [...map.values()].map((it) => {
-    const productJoined = it.products.join(" / ");
-    return {
-      ...it,
-      product: productJoined,
-    };
-  });
+  return [...map.values()].map((it) => ({
+    ...it,
+    product: it.products.join(" / "),
+  }));
 }
 
 async function readExisting(file) {
@@ -198,6 +169,34 @@ async function readExisting(file) {
   } catch {
     return null;
   }
+}
+
+async function writeSuccessOnFailure({ reason, error, rawCount }) {
+  const latestPath = path.join(OUTPUT_DIR, "latest.json");
+  const existing = await readExisting(latestPath);
+
+  const latestArray = existing && existing.length > 0 ? existing : [];
+
+  await fs.writeFile(latestPath, JSON.stringify(latestArray, null, 2));
+  await fs.writeFile(
+    path.join(OUTPUT_DIR, "debug.json"),
+    JSON.stringify(
+      {
+        generated_at: new Date().toISOString(),
+        rawCount: rawCount ?? 0,
+        latestCount: latestArray.length,
+        note: reason,
+        error: error ? String(error.message || error) : null,
+        kept_previous: existing && existing.length > 0,
+      },
+      null,
+      2
+    )
+  );
+
+  console.log(
+    `[info] soft-success: ${reason} (kept ${latestArray.length} items)`
+  );
 }
 
 async function main() {
@@ -211,26 +210,22 @@ async function main() {
     console.log(`[info] raw items: ${rawItems.length}`);
   } catch (err) {
     scrapeError = err;
-    console.error("[warn] scrape failed:", err && err.message ? err.message : err);
+    console.error(
+      "[warn] scrape failed:",
+      err && err.message ? err.message : err
+    );
   }
 
+  // 取得失敗 or 0件 → ジョブは緑のまま終わる
   if (scrapeError || !Array.isArray(rawItems) || rawItems.length === 0) {
-    const latestPath = path.join(OUTPUT_DIR, "latest.json");
-    const existingLatest = await readExisting(latestPath);
-
-    if (existingLatest && existingLatest.length > 0) {
-      const debug = {
-        generated_at: new Date().toISOString(),
-        rawCount: rawItems.length,
-        note: "scrape_failed_kept_previous_latest",
-        error: scrapeError ? String(scrapeError.message || scrapeError) : null,
-        latestCount: existingLatest.length,
-      };
-      await fs.writeFile(path.join(OUTPUT_DIR, "debug.json"), JSON.stringify(debug, null, 2));
-      console.log("[info] scrape failed but previous latest.json kept");
-      return;
-    }
-    throw scrapeError || new Error("no items scraped");
+    await writeSuccessOnFailure({
+      reason: scrapeError
+        ? "scrape_failed_soft_success"
+        : "scrape_zero_items_soft_success",
+      error: scrapeError,
+      rawCount: rawItems.length,
+    });
+    return;
   }
 
   const dropped = [];
@@ -265,10 +260,8 @@ async function main() {
     });
   }
 
-  // 1店舗×同一締切×同一URL でまとめる
   const merged = mergeSameGroup(normalized);
 
-  // 最終形にID・title・notes・has_deadlineを付ける
   const finalized = merged.map((it) => {
     const id = makeId([it.store, it.product, it.apply_url, it.deadline_iso || it.deadline_text]);
     const title = `【${it.store}】${it.product}`;
@@ -292,7 +285,6 @@ async function main() {
     };
   });
 
-  // open優先、なければ全件
   const openItems = finalized.filter((x) => x.status === "open");
   const latest = openItems.length > 0 ? openItems : finalized;
 
@@ -301,21 +293,12 @@ async function main() {
   console.log(`[info] latest items: ${latest.length}`);
 
   if (latest.length === 0) {
-    const existingLatest = await readExisting(path.join(OUTPUT_DIR, "latest.json"));
-    if (existingLatest && existingLatest.length > 0) {
-      const debug = {
-        generated_at: new Date().toISOString(),
-        rawCount: rawItems.length,
-        normalizedCount: normalized.length,
-        mergedCount: merged.length,
-        latestCount: 0,
-        note: "would_be_empty_kept_previous_latest",
-      };
-      await fs.writeFile(path.join(OUTPUT_DIR, "debug.json"), JSON.stringify(debug, null, 2));
-      console.log("[info] latest would be empty, kept previous latest.json");
-      return;
-    }
-    throw new Error("latest.json would be empty");
+    await writeSuccessOnFailure({
+      reason: "latest_would_be_empty_soft_success",
+      error: null,
+      rawCount: rawItems.length,
+    });
+    return;
   }
 
   const normalizedJson = JSON.stringify(merged, null, 2);
@@ -342,7 +325,17 @@ async function main() {
   console.log("[info] output files written");
 }
 
-main().catch((err) => {
-  console.error("Error:", err.message || err);
-  process.exit(1);
+main().catch(async (err) => {
+  // 想定外エラーもソフト成功で吸収 (デプロイは続行させる)
+  try {
+    await fs.mkdir(OUTPUT_DIR, { recursive: true });
+    await writeSuccessOnFailure({
+      reason: "unexpected_error_soft_success",
+      error: err,
+      rawCount: 0,
+    });
+  } catch (writeErr) {
+    console.error("Error while writing soft-success artifacts:", writeErr);
+    process.exit(1);
+  }
 });
