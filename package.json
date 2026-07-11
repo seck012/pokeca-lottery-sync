@@ -1,0 +1,14 @@
+{
+  "name": "pokeca-lottery-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "dayjs": "^1.11.13",
+    "undici": "^6.19.8",
+    "zod": "^3.23.8"
+  }
+}
