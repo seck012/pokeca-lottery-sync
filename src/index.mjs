@@ -26,7 +26,7 @@ async function main() {
     process.exit(1);
   }
 
-  const normalized = normalizeAll(raw);
+  const normalized = await normalizeAll(raw);
   const deduped = dedupeItems(normalized).slice(0, MAX_ITEMS);
   const latest = deduped.filter(x => x.status === "open" || x.status === "upcoming");
 
