@@ -1,123 +1,122 @@
-import { fetch } from "undici";
 import * as cheerio from "cheerio";
 
 const SOURCE_URL = "https://nyuka-now.com/archives/2459";
 
-function cleanText(text) {
-  return (text || "")
+function cleanText(value = "") {
+  return String(value)
     .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function isInternalNyukaUrl(url) {
-  return /^https?:\/\/nyuka-now\.com\/archives\//i.test(url || "");
+function absolutize(url) {
+  try {
+    return new URL(url, SOURCE_URL).toString();
+  } catch {
+    return "";
+  }
 }
 
-function scoreApplyUrl(url) {
-  if (!url) return -1;
-  if (/docs\.google\.com\/forms/i.test(url)) return 100;
-  if (/shop\.pokemon\.co\.jp/i.test(url)) return 95;
-  if (/kidsrepublic\.jp/i.test(url)) return 90;
-  if (/ryuunoshippo/i.test(url)) return 88;
-  if (/joshin/i.test(url)) return 88;
-  if (/aeon/i.test(url)) return 85;
-  if (/select-type\.com/i.test(url)) return 84;
-  if (/livepocket\.jp/i.test(url)) return 80;
-  if (/membercard\.jp/i.test(url)) return 78;
-  if (/x\.com|twitter\.com/i.test(url)) return 10;
-  if (isInternalNyukaUrl(url)) return 0;
-  return 50;
+function firstHref($td) {
+  if (!$td || !$td.length) return "";
+  const href = $td.find("a[href]").first().attr("href");
+  return href ? absolutize(href) : "";
 }
 
-function chooseBestApplyUrl(urls) {
-  const unique = [...new Set((urls || []).filter(Boolean))]
-    .filter(url => !isInternalNyukaUrl(url));
+function cleanProduct(value = "") {
+  let s = cleanText(value);
 
-  if (unique.length === 0) return null;
+  s = s.replace(/^ポケモンカード\s*/, "");
+  s = s.replace(/\s+/g, " ").trim();
 
-  unique.sort((a, b) => scoreApplyUrl(b) - scoreApplyUrl(a));
-  return unique[0] || null;
-}
+  if (!s) return "";
 
-function extractProductItems($, td) {
-  const items = [];
-
-  const lis = td.find("li");
-  if (lis.length > 0) {
-    lis.each((_, li) => {
-      const txt = cleanText($(li).text());
-      if (txt) items.push(txt);
-    });
-  } else {
-    const anchorTexts = td.find("a").map((_, a) => cleanText($(a).text())).get().filter(Boolean);
-    if (anchorTexts.length > 0) {
-      items.push(...anchorTexts);
-    } else {
-      const txt = cleanText(td.text());
-      if (txt) items.push(txt);
-    }
+  // 商品名ではない文を除外
+  if (/^(当選者|応募には|※|詳細は|ジョーシンアプリ|シーガルモバイル会員限定)/.test(s)) {
+    return "";
+  }
+  if (/^(WEB抽選受付|アプリ抽選受付|店頭販売|オンライン販売)/.test(s)) {
+    return "";
+  }
+  if (/Amazonでの販売予想価格/.test(s)) {
+    return "";
   }
 
-  return [...new Set(items)];
+  return s;
 }
 
-function parseTable($, table, sectionHeading) {
-  const obj = {
-    source: "nyuka-now",
-    detail_url: SOURCE_URL,
-    section_heading: cleanText(sectionHeading),
-    store_raw: cleanText(sectionHeading),
-    product_items_raw: [],
-    entry_start_raw: null,
-    entry_end_raw: null,
-    announce_at_raw: null,
-    conditions_raw: null,
-    apply_url_raw: null
-  };
+function pickProducts($, $td) {
+  const liItems = $td
+    .find("li")
+    .map((_, el) => cleanProduct($(el).text()))
+    .get()
+    .filter(Boolean);
 
-  const applyCandidates = [];
+  const linkItems = $td
+    .find("a")
+    .map((_, el) => cleanProduct($(el).text()))
+    .get()
+    .filter(Boolean);
 
-  $(table).find("tr").each((_, tr) => {
-    const key = cleanText($(tr).find("th").first().text());
-    const td = $(tr).find("td").first();
+  const rawText = cleanProduct($td.text());
 
-    if (!key || td.length === 0) return;
+  const list =
+    liItems.length > 0
+      ? liItems
+      : linkItems.length > 0
+      ? linkItems
+      : rawText
+      ? [rawText]
+      : [];
 
-    const val = cleanText(td.text());
+  return [...new Set(list)];
+}
 
-    if (key.includes("対象商品")) {
-      obj.product_items_raw = extractProductItems($, td);
-    } else if (key.includes("開始日")) {
-      obj.entry_start_raw = val;
-    } else if (key.includes("終了日") || key.includes("締切")) {
-      obj.entry_end_raw = val;
-    } else if (key.includes("当選発表")) {
-      obj.announce_at_raw = val;
-    } else if (key.includes("応募条件")) {
-      obj.conditions_raw = val;
-    } else if (key.includes("詳細ページ") || key.includes("応募ページ")) {
-      td.find("a[href]").each((__, a) => {
-        const href = $(a).attr("href");
-        if (href) applyCandidates.push(href);
-      });
+function extractRows($, $table) {
+  const rows = new Map();
+
+  $table.find("tr").each((_, tr) => {
+    const $tr = $(tr);
+    const key = cleanText($tr.find("th").first().text());
+    const $td = $tr.find("td").first();
+
+    if (key && $td.length) {
+      rows.set(key, $td);
     }
   });
 
-  obj.apply_url_raw = chooseBestApplyUrl(applyCandidates);
+  return rows;
+}
 
-  if (!obj.store_raw) return null;
-  if (!obj.product_items_raw || obj.product_items_raw.length === 0) return null;
-  if (!obj.apply_url_raw && !obj.entry_end_raw) return null;
+function nextTableForHeading($, $h3) {
+  let $node = $h3.next();
 
-  return obj;
+  while ($node.length) {
+    if ($node.is("h2, h3")) break;
+
+    if ($node.is("table")) {
+      return $node;
+    }
+
+    const $nested = $node.find("table").first();
+    if ($nested.length) {
+      return $nested;
+    }
+
+    $node = $node.next();
+  }
+
+  return null;
 }
 
 export async function scrapeNyukaNow() {
   const res = await fetch(SOURCE_URL, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; PokecaLotterySync/3.0)"
-    }
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+      "accept-language": "ja,en;q=0.9",
+      accept: "text/html,application/xhtml+xml",
+    },
   });
 
   if (!res.ok) {
@@ -127,36 +126,72 @@ export async function scrapeNyukaNow() {
   const html = await res.text();
   const $ = cheerio.load(html);
 
-  const startH2 = $("h2").filter((_, el) => {
-    const txt = cleanText($(el).text());
-    return txt.includes("抽選・予約応募受付中のストア");
-  }).first();
-
-  if (startH2.length === 0) {
-    throw new Error("target section '抽選・予約応募受付中のストア' not found");
-  }
+  const $root = $("article").first().length
+    ? $("article").first()
+    : $("main").first().length
+    ? $("main").first()
+    : $.root();
 
   const items = [];
-  let currentHeading = null;
-  let node = startH2.next();
 
-  while (node.length > 0) {
-    const tag = (node.get(0)?.tagName || node.get(0)?.name || "").toLowerCase();
+  $root.find("h3").each((_, h3) => {
+    const $h3 = $(h3);
+    const store = cleanText($h3.text());
 
-    if (tag === "h2") break;
+    if (!store) return;
 
-    if (tag === "h3") {
-      currentHeading = cleanText(node.text());
+    const $table = nextTableForHeading($, $h3);
+    if (!$table || !$table.length) return;
+
+    const rows = extractRows($, $table);
+
+    const productTd = rows.get("対象商品");
+    const endTd = rows.get("終了日");
+
+    // 抽選テーブル以外は無視
+    if (!productTd || !endTd) return;
+
+    const products = pickProducts($, productTd);
+
+    const detailUrl = firstHref(rows.get("詳細ページ"));
+    const applyPageUrl = firstHref(rows.get("応募ページ"));
+    const fallbackProductUrl = firstHref(productTd);
+    const applyUrl = applyPageUrl || detailUrl || fallbackProductUrl;
+
+    const base = {
+      source: "nyuka-now",
+      sourceUrl: SOURCE_URL,
+      store,
+      lotteryType: cleanText(rows.get("抽選形式")?.text() || ""),
+      entryStartText: cleanText(rows.get("開始日")?.text() || ""),
+      entryEndText: cleanText(endTd.text() || ""),
+      announceText: cleanText(rows.get("当選発表")?.text() || ""),
+      conditions: cleanText(rows.get("応募条件")?.text() || ""),
+      applyUrl,
+      apply_url: applyUrl,
+      detailUrl: detailUrl || fallbackProductUrl,
+      detail_url: detailUrl || fallbackProductUrl,
+    };
+
+    if (products.length === 0) {
+      items.push({
+        ...base,
+        product: "不明商品",
+        products: [],
+      });
+      return;
     }
 
-    if (tag === "table" && currentHeading) {
-      const parsed = parseTable($, node, currentHeading);
-      if (parsed) items.push(parsed);
+    for (const product of products) {
+      items.push({
+        ...base,
+        product,
+        products,
+      });
     }
+  });
 
-    node = node.next();
-  }
-
-  console.log(`[nyuka-now] extracted ${items.length} raw table records`);
   return items;
 }
+
+export default scrapeNyukaNow;
