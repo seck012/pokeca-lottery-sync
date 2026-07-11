@@ -5,110 +5,118 @@ const SOURCE_URL = "https://nyuka-now.com/archives/2459";
 
 function cleanText(text) {
   return (text || "")
-    .replace(/\s+/g, " ")
     .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-function normalizeStoreName(name) {
-  const t = cleanText(name);
+function isInternalNyukaUrl(url) {
+  return /^https?:\/\/nyuka-now\.com\/archives\//i.test(url || "");
+}
 
-  if (!t) return null;
+function scoreApplyUrl(url) {
+  if (!url) return -1;
+  if (/docs\.google\.com\/forms/i.test(url)) return 100;
+  if (/shop\.pokemon\.co\.jp/i.test(url)) return 95;
+  if (/kidsrepublic\.jp/i.test(url)) return 90;
+  if (/ryuunoshippo/i.test(url)) return 88;
+  if (/joshin/i.test(url)) return 88;
+  if (/aeon/i.test(url)) return 85;
+  if (/select-type\.com/i.test(url)) return 84;
+  if (/livepocket\.jp/i.test(url)) return 80;
+  if (/membercard\.jp/i.test(url)) return 78;
+  if (/x\.com|twitter\.com/i.test(url)) return 10;
+  if (isInternalNyukaUrl(url)) return 0;
+  return 50;
+}
 
-  const rules = [
-    [/ヨドバシ/i, "ヨドバシカメラ"],
-    [/ポケモンセンター/i, "ポケモンセンターオンライン"],
-    [/キッズリパブリック/i, "キッズリパブリック"],
-    [/ライブポケット|LivePocket/i, "LivePocket"],
-    [/ビックカメラ/i, "ビックカメラ"],
-    [/ヤマダ/i, "ヤマダデンキ"],
-    [/イオン/i, "イオン"],
-    [/楽天ブックス/i, "楽天ブックス"],
-    [/Amazon/i, "Amazon"],
-    [/HMV/i, "HMV"],
-    [/TSUTAYA/i, "TSUTAYA"],
-    [/セブンネット/i, "セブンネット"],
-    [/古本市場/i, "古本市場"],
-    [/駿河屋/i, "駿河屋"]
-  ];
+function chooseBestApplyUrl(urls) {
+  const unique = [...new Set((urls || []).filter(Boolean))]
+    .filter(url => !isInternalNyukaUrl(url));
 
-  for (const [pattern, normalized] of rules) {
-    if (pattern.test(t)) return normalized;
+  if (unique.length === 0) return null;
+
+  unique.sort((a, b) => scoreApplyUrl(b) - scoreApplyUrl(a));
+  return unique[0] || null;
+}
+
+function extractProductItems($, td) {
+  const items = [];
+
+  const lis = td.find("li");
+  if (lis.length > 0) {
+    lis.each((_, li) => {
+      const txt = cleanText($(li).text());
+      if (txt) items.push(txt);
+    });
+  } else {
+    const anchorTexts = td.find("a").map((_, a) => cleanText($(a).text())).get().filter(Boolean);
+    if (anchorTexts.length > 0) {
+      items.push(...anchorTexts);
+    } else {
+      const txt = cleanText(td.text());
+      if (txt) items.push(txt);
+    }
   }
 
-  return t;
+  return [...new Set(items)];
 }
 
-function inferStoreFromUrl(url) {
-  if (!url) return null;
-
-  const map = [
-    [/limited\.yodobashi\.com/i, "ヨドバシカメラ"],
-    [/kidsrepublic\.jp/i, "キッズリパブリック"],
-    [/shop\.pokemon\.co\.jp/i, "ポケモンセンターオンライン"],
-    [/livepocket\.jp/i, "LivePocket"],
-    [/biccamera\.com/i, "ビックカメラ"],
-    [/rakuten/i, "楽天系ストア"],
-    [/amazon\./i, "Amazon"],
-    [/7net/i, "セブンネット"],
-    [/hmv\.co\.jp/i, "HMV"],
-    [/suruga-ya/i, "駿河屋"]
-  ];
-
-  for (const [pattern, name] of map) {
-    if (pattern.test(url)) return name;
-  }
-
-  return null;
-}
-
-function looksLikeBadProduct(text) {
-  const t = cleanText(text);
-
-  if (!t) return true;
-
-  const banned = [
-    "当選者は",
-    "購入可能",
-    "応募条件",
-    "おひとりさま",
-    "まで購入可能",
-    "注意事項",
-    "会員限定",
-    "抽選形式",
-    "開始日",
-    "終了日",
-    "当選発表",
-    "詳細ページ",
-    "応募ページ"
-  ];
-
-  return banned.some(word => t.includes(word));
-}
-
-function pickBestApplyUrl(links) {
-  if (!Array.isArray(links) || links.length === 0) return null;
-
-  const unique = [...new Set(links.filter(Boolean))];
-
-  const score = (url) => {
-    if (/shop\.pokemon\.co\.jp/i.test(url)) return 100;
-    if (/limited\.yodobashi\.com/i.test(url)) return 95;
-    if (/kidsrepublic\.jp/i.test(url)) return 90;
-    if (/livepocket\.jp/i.test(url)) return 80;
-    if (/rakuten|amazon|biccamera|7net|hmv|suruga-ya/i.test(url)) return 70;
-    if (/x\.com|twitter\.com/i.test(url)) return 10;
-    return 50;
+function parseTable($, table, sectionHeading) {
+  const obj = {
+    source: "nyuka-now",
+    detail_url: SOURCE_URL,
+    section_heading: cleanText(sectionHeading),
+    store_raw: cleanText(sectionHeading),
+    product_items_raw: [],
+    entry_start_raw: null,
+    entry_end_raw: null,
+    announce_at_raw: null,
+    conditions_raw: null,
+    apply_url_raw: null
   };
 
-  unique.sort((a, b) => score(b) - score(a));
-  return unique[0] || null;
+  const applyCandidates = [];
+
+  $(table).find("tr").each((_, tr) => {
+    const key = cleanText($(tr).find("th").first().text());
+    const td = $(tr).find("td").first();
+
+    if (!key || td.length === 0) return;
+
+    const val = cleanText(td.text());
+
+    if (key.includes("対象商品")) {
+      obj.product_items_raw = extractProductItems($, td);
+    } else if (key.includes("開始日")) {
+      obj.entry_start_raw = val;
+    } else if (key.includes("終了日") || key.includes("締切")) {
+      obj.entry_end_raw = val;
+    } else if (key.includes("当選発表")) {
+      obj.announce_at_raw = val;
+    } else if (key.includes("応募条件")) {
+      obj.conditions_raw = val;
+    } else if (key.includes("詳細ページ") || key.includes("応募ページ")) {
+      td.find("a[href]").each((__, a) => {
+        const href = $(a).attr("href");
+        if (href) applyCandidates.push(href);
+      });
+    }
+  });
+
+  obj.apply_url_raw = chooseBestApplyUrl(applyCandidates);
+
+  if (!obj.store_raw) return null;
+  if (!obj.product_items_raw || obj.product_items_raw.length === 0) return null;
+  if (!obj.apply_url_raw && !obj.entry_end_raw) return null;
+
+  return obj;
 }
 
 export async function scrapeNyukaNow() {
   const res = await fetch(SOURCE_URL, {
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; PokecaLotterySync/2.0)"
+      "User-Agent": "Mozilla/5.0 (compatible; PokecaLotterySync/3.0)"
     }
   });
 
@@ -118,61 +126,37 @@ export async function scrapeNyukaNow() {
 
   const html = await res.text();
   const $ = cheerio.load(html);
+
+  const startH2 = $("h2").filter((_, el) => {
+    const txt = cleanText($(el).text());
+    return txt.includes("抽選・予約応募受付中のストア");
+  }).first();
+
+  if (startH2.length === 0) {
+    throw new Error("target section '抽選・予約応募受付中のストア' not found");
+  }
+
   const items = [];
+  let currentHeading = null;
+  let node = startH2.next();
 
-  $("table").each((_, table) => {
-    const obj = {
-      source: "nyuka-now",
-      detail_url: SOURCE_URL,
-      links: []
-    };
+  while (node.length > 0) {
+    const tag = (node.get(0)?.tagName || node.get(0)?.name || "").toLowerCase();
 
-    const $table = $(table);
+    if (tag === "h2") break;
 
-    const headingCandidates = [];
-    $table.prevAll("h2, h3, h4").slice(0, 3).each((__, el) => {
-      const txt = cleanText($(el).text());
-      if (txt) headingCandidates.push(txt);
-    });
+    if (tag === "h3") {
+      currentHeading = cleanText(node.text());
+    }
 
-    obj.section_heading = headingCandidates[0] || null;
+    if (tag === "table" && currentHeading) {
+      const parsed = parseTable($, node, currentHeading);
+      if (parsed) items.push(parsed);
+    }
 
-    $table.find("a[href]").each((__, a) => {
-      const href = $(a).attr("href");
-      if (href) obj.links.push(href);
-    });
+    node = node.next();
+  }
 
-    $table.find("tr").each((__, tr) => {
-      const key = cleanText($(tr).find("th").first().text());
-      const td = $(tr).find("td").first();
-      const val = cleanText(td.text());
-      const href = td.find("a").attr("href");
-
-      if (!key) return;
-
-      if (key.includes("対象商品")) obj.product_raw = val;
-      else if (key.includes("抽選形式")) obj.lottery_type = val;
-      else if (key.includes("開始日")) obj.entry_start_raw = val;
-      else if (key.includes("終了日") || key.includes("締切")) obj.entry_end_raw = val;
-      else if (key.includes("当選発表")) obj.announce_at_raw = val;
-      else if (key.includes("応募条件")) obj.conditions_raw = val;
-      else if (key.includes("応募ページ") || key.includes("詳細ページ")) {
-        if (href) obj.links.push(href);
-      }
-    });
-
-    const storeFromHeading = normalizeStoreName(obj.section_heading);
-    const storeFromUrl = inferStoreFromUrl(pickBestApplyUrl(obj.links));
-    obj.store_raw = storeFromHeading || storeFromUrl || "不明店舗";
-
-    obj.apply_url_raw = pickBestApplyUrl(obj.links);
-
-    if (!obj.product_raw || looksLikeBadProduct(obj.product_raw)) return;
-    if (!obj.apply_url_raw && !obj.entry_end_raw) return;
-
-    items.push(obj);
-  });
-
-  console.log(`[nyuka-now] extracted ${items.length} items`);
+  console.log(`[nyuka-now] extracted ${items.length} raw table records`);
   return items;
 }
